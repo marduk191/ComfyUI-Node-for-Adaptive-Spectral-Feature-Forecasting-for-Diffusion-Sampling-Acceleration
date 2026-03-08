@@ -1,4 +1,4 @@
-# Spectrum Patcher (Max) — ComfyUI Model Patch
+# Spectrum Patcher — ComfyUI Model Patch
 
 Training-free diffusion acceleration via Chebyshev spectral forecasting (in the style of *Adaptive Spectral Feature Forecasting for Diffusion Sampling Acceleration*).
 
