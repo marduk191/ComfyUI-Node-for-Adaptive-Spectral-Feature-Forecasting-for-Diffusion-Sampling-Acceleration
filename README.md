@@ -2,6 +2,9 @@
 
 Training-free diffusion acceleration via Chebyshev spectral forecasting (in the style of *Adaptive Spectral Feature Forecasting for Diffusion Sampling Acceleration*).
 
+Original Spectrum implementation/research repo:
+https://github.com/hanjq17/Spectrum
+
 This custom node is a **MODEL patcher**: it wraps the model UNet/DiT forward via `set_model_unet_function_wrapper(...)` so it can work with normal ComfyUI samplers (Euler, DPM++, etc.).
 
 ## Install
@@ -12,7 +15,7 @@ Recommended (clone into a correctly-named folder):
 
 ```bash
 cd /path/to/ComfyUI/custom_nodes
-git clone https://github.com/maximilianwicen/ComfyUI-Node-for-Adaptive-Spectral-Feature-Forecasting-for-Diffusion-Sampling-Acceleration.git ComfyUI-ValVexSpectrum
+git clone https://github.com/maximilianwicen/ComfyUI-Node-for-Adaptive-Spectral-Feature-Forecasting-for-Diffusion-Sampling-Acceleration.git ComfyUI-Max-Spectrum
 ```
 
 Then restart ComfyUI.
