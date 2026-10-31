@@ -99,6 +99,7 @@ Results from the test harness (a stand-in network, so treat these as relative nu
 - `w`: blend factor between forecast and last real output on forecast steps
 - `model_type`: `auto` (default) reads the model's sampling type, as described above. `flow` and `eps` force a mode.
 - `real_final_step` (optional, default on): always run the real model on the last step of the schedule. That step's output becomes the final latent, so forecasting it costs the most quality, especially on short flow schedules.
+- `warmup_steps` (optional, default 0): always run the real model for the first N steps of the schedule, where the output changes fastest. `0` keeps the minimal warm-up: the first two real passes the fit needs. Every extra warm-up step costs a model pass, so keep it at `0–2` on 4–8 step flow schedules. Longer runs have room for more warm-up.
 
 ## Testing
 

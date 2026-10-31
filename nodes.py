@@ -202,6 +202,11 @@ class MaxSpectrumPatcher:
                     "tooltip": "Always run the real model on the last step of the schedule. That "
                                "step's output becomes the final latent, so forecasting it costs the "
                                "most quality - especially on short flow schedules (4-8 steps)."}),
+                "warmup_steps": ("INT", {"default": 0, "min": 0, "max": 32, "step": 1,
+                    "tooltip": "Always run the real model for the first N steps, where the output "
+                               "changes fastest. 0 keeps the minimal warm-up (the first two real "
+                               "passes the fit needs). Each extra step costs one model pass, so keep "
+                               "it small on short schedules."}),
             },
         }
 
@@ -210,7 +215,7 @@ class MaxSpectrumPatcher:
     CATEGORY = "model/patches"
 
     def patch(self, model, w: float, m: int, lam: float, window_size: int, model_type: str = "auto",
-              real_final_step: bool = True):
+              real_final_step: bool = True, warmup_steps: int = 0):
         model_clone = model.clone()
 
         # Keep separate Spectrum state per (cond_or_uncond) signature.
@@ -222,6 +227,7 @@ class MaxSpectrumPatcher:
         win = int(max(1, window_size))
         forced_flow = model_type == "flow"
         forced_eps = model_type == "eps"
+        warmup = int(max(0, warmup_steps))
 
         # Model sampling as configured on this MODEL. A sampling node applied after this patch
         # (ModelSamplingSD3/Flux/AuraFlow, ...) replaces it, so the wrapper re-reads the live
@@ -343,7 +349,8 @@ class MaxSpectrumPatcher:
 
             # Decide whether to do a real model pass.
             must_run_real = (
-                (win <= 1)
+                (st.step_index < warmup)
+                or (win <= 1)
                 or (st.step_index % win == 0)
                 or (len(st.cache_ts) < 2)
                 or (real_final_step and is_final_step)

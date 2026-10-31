@@ -392,7 +392,18 @@ def test_edge_cases(res, steps):
         except Exception as e:
             res.check(f"WAN22 two-stage real_final_step={final}", False, repr(e))
 
-    # 6. Two consecutive runs on the same patched model (state must reset between runs).
+    # 6. warmup_steps: the first N schedule steps always run for real. 8 steps, window 2:
+    #    warmup 0 -> real 0, 1, 2, 4, 6, 7 (6 calls); warmup 4 -> real 0-4, 6, 7 (7 calls).
+    cfg, base, _ = build("ZImage")
+    for warmup, expected in ((0, 6), (4, 7), (8, 8)):
+        try:
+            out, calls = run(patch(base, warmup_steps=warmup), cfg, steps=8)
+            res.check(f"ZImage warmup_steps={warmup}: calls {calls} (expect {expected})",
+                      calls == expected and bool(torch.isfinite(out).all()))
+        except Exception as e:
+            res.check(f"ZImage warmup_steps={warmup}", False, repr(e))
+
+    # 7. Two consecutive runs on the same patched model (state must reset between runs).
     cfg, base, _ = build("Flux2")
     p = patch(base)
     try:
