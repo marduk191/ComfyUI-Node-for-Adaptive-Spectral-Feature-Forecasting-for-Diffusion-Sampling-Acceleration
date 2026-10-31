@@ -29,8 +29,6 @@ REPO = os.path.dirname(HERE)
 # (detection / segmentation / depth backbones that reuse the FLOW enum).
 NON_GENERATIVE = {"RT_DETR_v4", "SAM3", "SAM31", "DepthAnything3"}
 
-# Non-flow controls: auto-detection must NOT pick flow mode for these.
-EPS_CONTROLS = ["SD15", "SDXL", "CosmosT2V", "SVD_img2vid", "CogVideoX_T2V", "HunyuanDiT", "Stable_Cascade_C"]
 
 SAMPLERS = ["euler", "dpmpp_2m", "heun", "res_multistep", "uni_pc_bh2"]
 SCHEDULERS = ["simple", "beta", "normal", "sgm_uniform"]
@@ -38,7 +36,12 @@ SCHEDULERS = ["simple", "beta", "normal", "sgm_uniform"]
 KNOWN_LIMITATIONS = {
     # EDM v-prediction with sigma up to 700: the polynomial is fitted on raw sigma, so most steps
     # sit at one end of the Chebyshev domain. Not a flow model.
-    "SVD_img2vid": "EDM sigma range (0.002..700) fits poorly on a raw-sigma axis",
+    # Stable Audio 1.0 (V_PREDICTION_CONTINUOUS, sigma up to 500) behaves the same. On these
+    # ranges even plain last-output caching drifts far at 8 steps; the forecast is about on par.
+    "SVD_img2vid": "EDM sigma range (0.002..700): skipping steps is lossy even with plain caching",
+    "SV3D_u": "EDM sigma range (0.002..700): skipping steps is lossy even with plain caching",
+    "SV3D_p": "EDM sigma range (0.002..700): skipping steps is lossy even with plain caching",
+    "StableAudio": "continuous-v sigma range (0.03..500): skipping steps is lossy even with plain caching",
     # Rectified flow on an EDM-style sigma range (0.002..80). Forecasting is roughly on par with
     # plain output caching here; fitting on flow time sigma/(sigma+1) instead tested worse.
     "CosmosT2IPredict2": "forecast ~= last-output caching on the 0.002..80 sigma range",
@@ -415,10 +418,12 @@ def main():
             continue
         (flow_models if is_comfy_flow(pt.get_model_object("model_sampling")) else eps_models).append(name)
 
-    print(f"ComfyUI flow models ({len(flow_models)}): {', '.join(flow_models)}\n")
+    print(f"ComfyUI flow models ({len(flow_models)}): {', '.join(flow_models)}")
+    print(f"ComfyUI non-flow models ({len(eps_models)}): {', '.join(eps_models)}\n")
+    # Every registered generative model: auto must pick flow for flow models and eps for the rest.
     for name in flow_models:
         test_model(res, name, ARGS.steps, expect_flow=True)
-    for name in EPS_CONTROLS:
+    for name in eps_models:
         test_model(res, name, ARGS.steps, expect_flow=False)
     test_edge_cases(res, ARGS.steps)
     if not ARGS.quick:

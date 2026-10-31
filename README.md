@@ -38,7 +38,7 @@ Works with any model that uses ComfyUI's standard MODEL patcher interface:
 
 `model_type = auto` decides "flow" the same way ComfyUI does (`isinstance(model_sampling, comfy.model_sampling.CONST)`, plus `COSMOS_RFLOW`). It reads the model's live `model_sampling` at sampling time, so a shift node such as `ModelSamplingSD3`, `ModelSamplingFlux` or `ModelSamplingAuraFlow` placed after this patcher is still picked up.
 
-The table lists every flow model registered in ComfyUI's `comfy/supported_models.py` (audited against [Comfy-Org/ComfyUI@`7c4390a`](https://github.com/Comfy-Org/ComfyUI/tree/7c4390a6f70cd8eb41014d6af52969397a752fc4), 2026-10-31). Every row is covered by `tests/test_flow_models.py`.
+The table lists every flow model registered in ComfyUI's `comfy/supported_models.py` (audited against [Comfy-Org/ComfyUI@`0dbfd49`](https://github.com/Comfy-Org/ComfyUI/tree/0dbfd493b4cc604db743c699f0f7ce01348e54a4), 2026-10-31). Every row is covered by `tests/test_flow_models.py`.
 
 | Family | ComfyUI model configs | Sampling |
 |---|---|---|
@@ -65,7 +65,18 @@ The table lists every flow model registered in ComfyUI's `comfy/supported_models
 | Audio: Stable Audio 3, ACE-Step (1.0 / 1.5), MiniMax Music 3, YuE 2 | `StableAudio3`, `ACEStep`, `ACEStep15`, `MiniMaxMusic3`, `YuE2` | `ModelSamplingDiscreteFlow` |
 | 3D: Hunyuan3D 2.0 / 2.0 mini / 2.1, TripoSplat, Trellis 2 | `Hunyuan3Dv2`, `Hunyuan3Dv2mini`, `Hunyuan3Dv2_1`, `TripoSplat`, `Trellis2` | `ModelSamplingDiscreteFlow` |
 
-Not flow (auto picks `eps`): the original Cosmos 1.0 video models (`CosmosT2V`/`CosmosI2V`, EDM), SVD/SV3D, CogVideoX, HunyuanDiT, PixArt, Stable Cascade, Stable Audio 1.0.
+### Non-flow models
+
+`auto` picks `eps` for all 30 non-flow models ComfyUI registers:
+
+- SD 1.x/2.x and variants: `SD15`, `SD15_instructpix2pix`, `SD20`, `SD21UnclipL`, `SD21UnclipH`, `Stable_Zero123`, `LotusD`, `SD_X4Upscaler`
+- SDXL and variants: `SDXL`, `SDXLRefiner`, `SDXL_instructpix2pix`, `SSD1B`, `KOALA_700M`, `KOALA_1B`, `Segmind_Vega`
+- DiTs: `PixArtAlpha`, `PixArtSigma`, `HunyuanDiT`, `HunyuanDiT1`
+- Stable Cascade: `Stable_Cascade_C`, `Stable_Cascade_B`
+- Video and 3D: `CosmosT2V`, `CosmosI2V` (Cosmos 1.0, EDM), `CogVideoX_T2V`, `CogVideoX_I2V`, `CogVideoX_Inpaint`, `SVD_img2vid`, `SV3D_u`, `SV3D_p`
+- Audio: `StableAudio` (1.0)
+
+All of them run correctly with the patch. **SVD, SV3D and Stable Audio 1.0** are the exception on quality. Their sigmas reach 700 (500 for Stable Audio), and over such a wide range, skipping steps is lossy even with plain reuse of the last output; the forecast is roughly on par with that. Expect little benefit from this node on them, especially at low step counts.
 
 Results from the test harness (a stand-in network, so treat these as relative numbers, not image quality):
 
