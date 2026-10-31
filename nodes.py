@@ -11,43 +11,80 @@ def _to_float_timestep(timestep) -> float:
     return float(timestep)
 
 
-def _is_flow_schedule(c: dict) -> bool:
-    """Return True if the sigma schedule looks like a rectified-flow model (Z-Image Turbo, Flux, SD3, etc.).
+# ComfyUI model_sampling mixins that mark a rectified-flow / flow-matching model.
+# ComfyUI builds model_sampling as `class ModelSampling(<sampling base>, <prediction type>)`
+# (comfy/model_base.py:model_sampling) and itself tests for flow models with
+# `isinstance(model_sampling, comfy.model_sampling.CONST)`:
+#   CONST         - ModelType.FLOW / FLUX / FLOW_AV and the IMG_TO_IMG_FLOW / IMG_TO_IMG_VELOCITY
+#                   subclasses (SD3, Flux 1/2, Wan, HunyuanVideo, Qwen-Image, Z-Image, LTX-Video, ...)
+#   COSMOS_RFLOW  - ModelType.FLOW_COSMOS (Cosmos Predict2: rectified flow on an EDM-style sigma range)
+_FLOW_SAMPLING_TYPES = ("CONST", "COSMOS_RFLOW")
 
-    These models use sigmas in [0, 1] with a near-linear schedule, unlike standard
-    diffusion models (SD 1.5, SDXL) whose sigmas reach ~14+.
+
+def _model_sampling_is_flow(model_sampling) -> Optional[bool]:
+    """Classify a ComfyUI model_sampling object; None if it can't be inspected.
+
+    Matches on class names in the MRO rather than importing comfy.model_sampling so the
+    check also works for model_sampling classes built by other custom nodes.
+    """
+    if model_sampling is None:
+        return None
+    try:
+        names = {k.__name__ for k in type(model_sampling).__mro__}
+    except Exception:
+        return None
+    return any(n in names for n in _FLOW_SAMPLING_TYPES)
+
+
+def _model_sampling_sigma_range(model_sampling) -> Optional[Tuple[float, float]]:
+    try:
+        return float(model_sampling.sigma_min), float(model_sampling.sigma_max)
+    except Exception:
+        return None
+
+
+def _sample_sigmas_from_c(c: dict) -> Optional[torch.Tensor]:
+    """The full sampling schedule ComfyUI stores in transformer_options["sample_sigmas"].
+
+    Note: transformer_options["sigmas"] is NOT the schedule - ComfyUI sets it to the current
+    timestep (one value per batch item) in samplers._calc_cond_batch, so it isn't used here.
     """
     try:
         t_opts = c.get("transformer_options", None) if isinstance(c, dict) else None
         if not isinstance(t_opts, dict):
-            return False
+            return None
         sigmas = t_opts.get("sample_sigmas", None)
-        if sigmas is None:
-            sigmas = t_opts.get("sigmas", None)
         if torch.is_tensor(sigmas) and sigmas.numel() > 1:
-            s_max = float(sigmas.detach().flatten().float().max().item())
-            return s_max <= 1.05
+            return sigmas
     except Exception:
         pass
-    return False
+    return None
+
+
+def _is_flow_schedule(c: dict) -> bool:
+    """Last-resort heuristic used only when the model_sampling object is unavailable.
+
+    Flow models (CONST) sample sigmas in [0, 1]. This can misfire on low-denoise img2img with
+    eps models (every sigma < 1), which is why the model_sampling check takes priority.
+    """
+    sigmas = _sample_sigmas_from_c(c)
+    if sigmas is None:
+        return False
+    try:
+        return float(sigmas.detach().flatten().float().max().item()) <= 1.05
+    except Exception:
+        return False
 
 
 def _schedule_minmax_from_c(c: dict) -> Optional[Tuple[float, float]]:
+    sigmas = _sample_sigmas_from_c(c)
+    if sigmas is None:
+        return None
     try:
-        t_opts = c.get("transformer_options", None)
-        if not isinstance(t_opts, dict):
-            return None
-
-        sigmas = t_opts.get("sample_sigmas", None)
-        if sigmas is None:
-            sigmas = t_opts.get("sigmas", None)
-
-        if torch.is_tensor(sigmas) and sigmas.numel() > 1:
-            s = sigmas.detach().flatten().float()
-            return float(s.min().item()), float(s.max().item())
+        s = sigmas.detach().flatten().float()
+        return float(s.min().item()), float(s.max().item())
     except Exception:
         return None
-    return None
 
 
 def _normalize_to_unit_interval(t: torch.Tensor, t_min: float, t_max: float) -> torch.Tensor:
@@ -154,17 +191,26 @@ class MaxSpectrumPatcher:
                 "lam": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 100.0, "step": 0.001}),
                 "window_size": ("INT", {"default": 2, "min": 1, "max": 32, "step": 1}),
                 "model_type": (["auto", "eps", "flow"], {"default": "auto",
-                    "tooltip": "Model parameterization. 'flow' covers rectified-flow models "
-                               "(Z-Image Turbo, Flux, SD3). 'eps' covers standard diffusion "
-                               "(SD 1.5, SDXL). 'auto' detects from the sigma schedule."}),
-            }
+                    "tooltip": "Model parameterization. 'flow' covers rectified-flow / flow-matching "
+                               "models (Flux 1/2, SD3, Wan, HunyuanVideo, Qwen-Image, Z-Image, "
+                               "LTX-Video, Chroma, HiDream, Lumina 2, Cosmos Predict2, ...). 'eps' "
+                               "covers eps/v-prediction/EDM models (SD 1.5, SDXL, SVD). 'auto' "
+                               "reads the model's sampling type, the same way ComfyUI does."}),
+            },
+            "optional": {
+                "real_final_step": ("BOOLEAN", {"default": True,
+                    "tooltip": "Always run the real model on the last step of the schedule. That "
+                               "step's output becomes the final latent, so forecasting it costs the "
+                               "most quality - especially on short flow schedules (4-8 steps)."}),
+            },
         }
 
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
     CATEGORY = "model/patches"
 
-    def patch(self, model, w: float, m: int, lam: float, window_size: int, model_type: str = "auto"):
+    def patch(self, model, w: float, m: int, lam: float, window_size: int, model_type: str = "auto",
+              real_final_step: bool = True):
         model_clone = model.clone()
 
         # Keep separate Spectrum state per (cond_or_uncond) signature.
@@ -176,6 +222,15 @@ class MaxSpectrumPatcher:
         win = int(max(1, window_size))
         forced_flow = model_type == "flow"
         forced_eps = model_type == "eps"
+
+        # Model sampling as configured on this MODEL. A sampling node applied after this patch
+        # (ModelSamplingSD3/Flux/AuraFlow, ...) replaces it, so the wrapper re-reads the live
+        # object from the model at call time and only falls back to this one.
+        try:
+            patch_time_sampling = model.get_model_object("model_sampling")
+        except Exception:
+            patch_time_sampling = None
+        debug: Dict[str, object] = {}
 
         def _get_state(key: Tuple[int, ...]) -> _SpectrumState:
             st = states.get(key)
@@ -219,26 +274,26 @@ class MaxSpectrumPatcher:
                 st.last_device = out_device
 
             # Step index handling: prefer schedule-based index if available.
-            schedule = None
-            try:
-                t_opts = c.get("transformer_options", {}) if isinstance(c, dict) else {}
-                schedule = t_opts.get("sample_sigmas", None)
-                if schedule is None:
-                    schedule = t_opts.get("sigmas", None)
-            except Exception:
-                schedule = None
+            schedule = _sample_sigmas_from_c(c)
+
+            # model_function is BaseModel.apply_model, so its owner holds the live model_sampling.
+            model_sampling = getattr(getattr(model_function, "__self__", None), "model_sampling", None)
+            if model_sampling is None:
+                model_sampling = patch_time_sampling
 
             # Detect model type for correct sigma-domain handling.
-            # Rectified-flow models (Z-Image Turbo, Flux, SD3) use sigmas in [0, 1];
-            # standard diffusion models (SD 1.5, SDXL) use much larger sigma ranges.
             if forced_flow:
                 is_flow = True
             elif forced_eps:
                 is_flow = False
             else:
-                is_flow = _is_flow_schedule(c)
+                is_flow = _model_sampling_is_flow(model_sampling)
+                if is_flow is None:
+                    is_flow = _is_flow_schedule(c)
+            debug["is_flow"] = is_flow
 
-            if torch.is_tensor(schedule) and schedule.numel() > 1:
+            is_final_step = False
+            if schedule is not None:
                 sigmas = schedule.detach().flatten()
                 t0 = float(sigmas[0].item())
                 # If we jumped back to the first sigma (or higher), treat as reset.
@@ -253,6 +308,8 @@ class MaxSpectrumPatcher:
                 except Exception:
                     idx = st.step_index
                 st.step_index = idx
+                # The sampler evaluates sigmas[0 .. n-2] and steps to sigmas[n-1] (usually 0).
+                is_final_step = idx >= sigmas.numel() - 2
             else:
                 if st.last_t is None:
                     st.step_index = 0
@@ -265,13 +322,16 @@ class MaxSpectrumPatcher:
             def _resolve_tminmax(extra_t=None):
                 """Return (t_min, t_max) for Chebyshev domain normalization.
 
-                Priority: schedule from context → flow-model canonical [0,1] →
-                cache-derived range.
+                Priority: sampling schedule from context -> the model's own sigma range ->
+                flow-model canonical [0, 1] -> cache-derived range.
                 """
                 tminmax = _schedule_minmax_from_c(c)
                 if tminmax is not None:
                     return tminmax
-                # For flow models (Z-Image Turbo, Flux, SD3) fall back to [0, 1].
+                ms_range = _model_sampling_sigma_range(model_sampling)
+                if ms_range is not None:
+                    # Flow schedules run down to sigma = 0 (ComfyUI appends it), not sigma_min.
+                    return (0.0 if is_flow else ms_range[0]), ms_range[1]
                 if is_flow:
                     return 0.0, 1.0
                 pts = list(st.cache_ts)
@@ -282,7 +342,12 @@ class MaxSpectrumPatcher:
                 return float(min(pts)), float(max(pts))
 
             # Decide whether to do a real model pass.
-            must_run_real = (win <= 1) or (st.step_index % win == 0) or (len(st.cache_ts) < 2)
+            must_run_real = (
+                (win <= 1)
+                or (st.step_index % win == 0)
+                or (len(st.cache_ts) < 2)
+                or (real_final_step and is_final_step)
+            )
             if must_run_real:
                 y = model_function(x_in, timestep, **c)
                 if not torch.is_tensor(y):
@@ -305,7 +370,11 @@ class MaxSpectrumPatcher:
                     xs = _normalize_to_chebyshev_domain(ts, t_min=t_min, t_max=t_max)
                     Phi = _chebyshev_design_matrix(xs, degree=degree)
 
-                    Y = torch.stack([v.float().reshape(-1) for v in st.cache_y], dim=0)  # [N, D]
+                    # Fit the history *relative to the newest real output*. The ridge penalty
+                    # then shrinks the forecast toward that output (plain caching) instead of
+                    # toward zero, which biased every forecast - noticeably on flow models.
+                    anchor = st.cache_y[-1].float().reshape(-1)
+                    Y = torch.stack([v.float().reshape(-1) - anchor for v in st.cache_y], dim=0)  # [N, D]
                     st.coeffs = _fit_ridge(Phi, Y, lam=lam_f)
                 except Exception:
                     st.coeffs = None
@@ -325,7 +394,7 @@ class MaxSpectrumPatcher:
                     t_min=t_min,
                     t_max=t_max,
                 )
-                pred_flat = _forecast_from_coeffs(st.coeffs, x_t)
+                pred_flat = last_real.float().reshape(-1) + _forecast_from_coeffs(st.coeffs, x_t)
                 pred = pred_flat.reshape(last_real.shape).to(dtype=last_real.dtype)
 
                 if not torch.isfinite(pred).all():
@@ -339,6 +408,7 @@ class MaxSpectrumPatcher:
             except Exception:
                 return model_function(x_in, timestep, **c)
 
+        unet_wrapper_function.spectrum_debug = debug
         model_clone.set_model_unet_function_wrapper(unet_wrapper_function)
         return (model_clone,)
 
