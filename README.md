@@ -1,5 +1,5 @@
 # Spectrum Patcher — ComfyUI Model Patch
-<img width="1200" height="720" alt="spectrum-patcher-guide" src="https://github.com/user-attachments/assets/17b6c2f6-a7e7-418f-b117-dc548fbf5532" />
+<img width="1200" height="990" alt="Spectrum Patcher parameter reference" src="spectrum-patcher-guide.png" />
 
 Training-free diffusion acceleration via Chebyshev spectral forecasting (in the style of *Adaptive Spectral Feature Forecasting for Diffusion Sampling Acceleration*).
 
