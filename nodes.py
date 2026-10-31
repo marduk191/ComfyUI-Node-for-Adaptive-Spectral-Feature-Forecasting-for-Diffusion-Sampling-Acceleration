@@ -1,3 +1,13 @@
+"""Spectrum Patcher (Max): training-free sampling acceleration for ComfyUI.
+
+The patcher wraps BaseModel.apply_model through ComfyUI's model_function_wrapper hook. Every
+`window_size`-th step (plus warm-up and the final step) runs the real model; the steps in
+between are forecast from a ridge-regularized Chebyshev fit of the most recent real outputs
+(the denoised x0 prediction), blended with the last real output by `w`.
+
+See README.md for the parameter guide, the model compatibility list and the test harness.
+"""
+
 import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -186,10 +196,18 @@ class MaxSpectrumPatcher:
         return {
             "required": {
                 "model": ("MODEL",),
-                "w": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "m": ("INT", {"default": 4, "min": 1, "max": 16, "step": 1}),
-                "lam": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 100.0, "step": 0.001}),
-                "window_size": ("INT", {"default": 2, "min": 1, "max": 32, "step": 1}),
+                "w": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Blend on forecast steps: 0 = reuse the last real output, 1 = pure "
+                               "forecast. Start at 0.5 and raise toward 0.8 if the output stays clean."}),
+                "m": ("INT", {"default": 4, "min": 1, "max": 16, "step": 1,
+                    "tooltip": "Chebyshev basis size. The fit uses up to m+1 cached real outputs; keep "
+                               "m below steps / window_size to avoid overfitting."}),
+                "lam": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 100.0, "step": 0.001,
+                    "tooltip": "Ridge strength. Higher pulls the forecast toward the last real output "
+                               "(plain caching); 0 trusts the polynomial fully."}),
+                "window_size": ("INT", {"default": 2, "min": 1, "max": 32, "step": 1,
+                    "tooltip": "Run the real model every Nth step and forecast the steps in between. "
+                               "1 disables forecasting (identical to the unpatched model)."}),
                 "model_type": (["auto", "eps", "flow"], {"default": "auto",
                     "tooltip": "Model parameterization. 'flow' covers rectified-flow / flow-matching "
                                "models (Flux 1/2, SD3, Wan, HunyuanVideo, Qwen-Image, Z-Image, "
@@ -210,6 +228,11 @@ class MaxSpectrumPatcher:
             },
         }
 
+    DESCRIPTION = (
+        "Speeds up sampling by running the real model only every few steps and forecasting the "
+        "skipped steps from recent outputs (Chebyshev spectral forecasting). Works with any "
+        "sampler and auto-detects flow models. Place it before the sampler."
+    )
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
     CATEGORY = "model/patches"
@@ -238,6 +261,10 @@ class MaxSpectrumPatcher:
             patch_time_sampling = None
         debug: Dict[str, object] = {}
 
+        # ComfyUI keeps a single model_function_wrapper slot. Chain whatever an earlier node put
+        # there (e.g. ChromaRadianceOptions) so it still runs on every real model pass.
+        prev_wrapper = model.model_options.get("model_function_wrapper", None)
+
         def _get_state(key: Tuple[int, ...]) -> _SpectrumState:
             st = states.get(key)
             if st is None:
@@ -250,6 +277,11 @@ class MaxSpectrumPatcher:
             x_in = kwargs["input"]
             timestep = kwargs["timestep"]
             c = kwargs.get("c", {})
+
+            def real_pass():
+                if prev_wrapper is not None:
+                    return prev_wrapper(model_function, kwargs)
+                return model_function(x_in, timestep, **c)
 
             key_list = kwargs.get("cond_or_uncond", [])
             try:
@@ -356,7 +388,7 @@ class MaxSpectrumPatcher:
                 or (real_final_step and is_final_step)
             )
             if must_run_real:
-                y = model_function(x_in, timestep, **c)
+                y = real_pass()
                 if not torch.is_tensor(y):
                     return y
 
@@ -390,7 +422,7 @@ class MaxSpectrumPatcher:
 
             # Forecast pass.
             if st.coeffs is None or len(st.cache_y) == 0:
-                return model_function(x_in, timestep, **c)
+                return real_pass()
 
             try:
                 last_real = st.cache_y[-1]
@@ -405,7 +437,7 @@ class MaxSpectrumPatcher:
                 pred = pred_flat.reshape(last_real.shape).to(dtype=last_real.dtype)
 
                 if not torch.isfinite(pred).all():
-                    return model_function(x_in, timestep, **c)
+                    return real_pass()
 
                 if w_f >= 1.0:
                     return pred
@@ -413,7 +445,7 @@ class MaxSpectrumPatcher:
                     return last_real
                 return (w_f * pred) + ((1.0 - w_f) * last_real)
             except Exception:
-                return model_function(x_in, timestep, **c)
+                return real_pass()
 
         unet_wrapper_function.spectrum_debug = debug
         model_clone.set_model_unet_function_wrapper(unet_wrapper_function)

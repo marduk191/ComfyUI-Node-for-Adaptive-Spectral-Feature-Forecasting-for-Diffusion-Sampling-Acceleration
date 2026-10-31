@@ -94,6 +94,7 @@ class TinyNet(torch.nn.Module):
 
     calls = 0
     out_ch = None
+    seen_options = []  # transformer_options keys of interest, one entry per call
 
     def __init__(self):
         super().__init__()
@@ -105,6 +106,7 @@ class TinyNet(torch.nn.Module):
 
     def forward(self, x, timesteps=None, *args, **kwargs):
         TinyNet.calls += 1
+        TinyNet.seen_options.append("chroma_radiance_options" in (kwargs.get("transformer_options") or {}))
         if isinstance(x, (list, tuple)):
             return [self._f(v, timesteps) for v in x]
         return self._f(x, timesteps)
@@ -403,7 +405,28 @@ def test_edge_cases(res, steps):
         except Exception as e:
             res.check(f"ZImage warmup_steps={warmup}", False, repr(e))
 
-    # 7. Two consecutive runs on the same patched model (state must reset between runs).
+    # 7. Another node's model_function_wrapper set *before* the patcher must keep working.
+    #    ChromaRadianceOptions (ComfyUI core) injects transformer_options through that hook.
+    try:
+        from comfy_extras.nodes_chroma_radiance import ChromaRadianceOptions
+        cfg, base, _ = build("ChromaRadiance")
+
+        def radiance(m):
+            out = ChromaRadianceOptions.execute(model=m, preserve_wrapper=True, start_sigma=1.0, end_sigma=0.0,
+                                                nerf_tile_size=16, force_sequential_txt_ids=False)
+            return out.result[0] if hasattr(out, "result") else out[0]
+
+        for order, model in (("Radiance -> Spectrum", patch(radiance(base))),
+                             ("Spectrum -> Radiance", radiance(patch(base)))):
+            TinyNet.seen_options = []
+            run(model, cfg, steps=steps)
+            seen = TinyNet.seen_options
+            res.check(f"ChromaRadianceOptions {order}: options reach the model on {sum(seen)}/{len(seen)} real passes",
+                      len(seen) > 0 and all(seen))
+    except Exception as e:
+        res.check("ChromaRadianceOptions chaining", False, repr(e))
+
+    # 8. Two consecutive runs on the same patched model (state must reset between runs).
     cfg, base, _ = build("Flux2")
     p = patch(base)
     try:
